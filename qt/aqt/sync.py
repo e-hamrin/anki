@@ -34,7 +34,6 @@ from aqt.utils import (
     show_warning,
     showText,
     showWarning,
-    tooltip,
     tr,
 )
 
@@ -97,12 +96,26 @@ def sync_collection(mw: aqt.main.AnkiQt, on_done: Callable[[], None]) -> None:
     if not auth:
         raise Exception("expected auth")
 
+    # Open the progress window like the original with_progress() would.
+    mw.progress.start(
+        parent=mw,
+        immediate=True,
+        label=tr.sync_checking(),
+        title=tr.sync_checking(),
+    )
+
     def on_timer() -> None:
         on_normal_sync_timer(mw)
 
     timer = QTimer(mw)
     qconnect(timer.timeout, on_timer)
     timer.start(150)
+
+    def finish_success_in_window() -> None:
+        # close progress, then do the normal post-sync steps
+        mw.progress.finish()
+        mw.media_syncer.start_monitoring()
+        on_done()
 
     def on_future_done(fut: Future[SyncOutput]) -> None:
         # scheduler version may have changed
@@ -112,6 +125,7 @@ def sync_collection(mw: aqt.main.AnkiQt, on_done: Callable[[], None]) -> None:
             out = fut.result()
         except Exception as err:
             handle_sync_error(mw, err)
+            mw.progress.finish()
             return on_done()
 
         mw.pm.set_host_number(out.host_number)
@@ -119,20 +133,25 @@ def sync_collection(mw: aqt.main.AnkiQt, on_done: Callable[[], None]) -> None:
             mw.pm.set_current_sync_url(out.new_endpoint)
         if out.server_message:
             showText(out.server_message, parent=mw)
+
         if out.required == out.NO_CHANGES:
-            tooltip(parent=mw, msg=tr.sync_collection_complete())
-            # all done; track media progress
-            mw.media_syncer.start_monitoring()
-            return on_done()
+            # Show the success message INSIDE the sync window.
+            mw.progress.set_title(tr.sync_collection_complete())
+            mw.progress.update(process=False, label=tr.sync_collection_complete())
+
+            # Keep it visible briefly, then finish like usual.
+            QTimer.singleShot(1200, finish_success_in_window)
+            return
         else:
+            # Hand over to full sync flow; close this progress first.
+            mw.progress.finish()
             full_sync(mw, out, on_done)
 
-    mw.taskman.with_progress(
+    # Run the sync in the background (same as before), but since we’re
+    # managing the progress dialog, use run_in_background instead of with_progress.
+    mw.taskman.run_in_background(
         lambda: mw.col.sync_collection(auth, mw.pm.media_syncing_enabled()),
         on_future_done,
-        label=tr.sync_checking(),
-        immediate=True,
-        title=tr.sync_checking(),
     )
 
 
